@@ -4,7 +4,7 @@ go 1.16
 
 require (
 	github.com/ArthurHlt/go-eureka-client v1.1.0
-	github.com/Shopify/sarama v1.29.0
+	github.com/Shopify/sarama v1.34.0
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/facebookgo/ensure v0.0.0-20200202191622-63f1cf65ac4c // indirect
 	github.com/facebookgo/freeport v0.0.0-20150612182905-d4adf43b75b9 // indirect
@@ -18,7 +18,7 @@ require (
 	github.com/hashicorp/consul/api v1.8.1
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/json-iterator/go v1.1.11
-	github.com/klauspost/compress v1.13.1
+	github.com/klauspost/compress v1.15.0
 	github.com/lucas-clemente/quic-go v0.21.1
 	github.com/megaease/easemesh-api v0.0.0-20210604095307-27c2d1f7cf09
 	github.com/megaease/grace v1.0.0
@@ -30,6 +30,7 @@ require (
 	github.com/openzipkin/zipkin-go v0.2.5
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
+	github.com/pierrec/lz4 v2.6.0+incompatible // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475
 	github.com/rs/cors v1.7.0
 	github.com/spf13/cobra v1.1.3
@@ -46,7 +47,6 @@ require (
 	go.etcd.io/etcd/server/v3 v3.5.0
 	go.uber.org/zap v1.17.0
 	gopkg.in/yaml.v2 v2.4.0
-	gotest.tools/v3 v3.0.3
 	k8s.io/api v0.20.7
 	k8s.io/apimachinery v0.20.7
 	k8s.io/cli-runtime v0.20.7 // indirect
