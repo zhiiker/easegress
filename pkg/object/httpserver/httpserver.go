@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +15,15 @@
  * limitations under the License.
  */
 
+// Package httpserver implements the HTTPServer.
 package httpserver
 
 import (
-	"github.com/megaease/easegress/pkg/protocol"
-	"github.com/megaease/easegress/pkg/supervisor"
+	"strings"
+
+	"github.com/megaease/easegress/v2/pkg/api"
+	"github.com/megaease/easegress/v2/pkg/context"
+	"github.com/megaease/easegress/v2/pkg/supervisor"
 )
 
 const (
@@ -32,6 +36,12 @@ const (
 
 func init() {
 	supervisor.Register(&HTTPServer{})
+	api.RegisterObject(&api.APIResource{
+		Category: Category,
+		Kind:     Kind,
+		Name:     strings.ToLower(Kind),
+		Aliases:  []string{"httpservers", "hs"},
+	})
 }
 
 type (
@@ -60,28 +70,22 @@ func (hs *HTTPServer) DefaultSpec() interface{} {
 	}
 }
 
-// Init initilizes HTTPServer.
-func (hs *HTTPServer) Init(superSpec *supervisor.Spec,
-	super *supervisor.Supervisor, muxMapper protocol.MuxMapper) {
-
-	hs.runtime = newRuntime(super, muxMapper)
+// Init initializes HTTPServer.
+func (hs *HTTPServer) Init(superSpec *supervisor.Spec, muxMapper context.MuxMapper) {
+	hs.runtime = newRuntime(superSpec, muxMapper)
 
 	hs.runtime.eventChan <- &eventReload{
 		nextSuperSpec: superSpec,
-		super:         super,
 		muxMapper:     muxMapper,
 	}
 }
 
 // Inherit inherits previous generation of HTTPServer.
-func (hs *HTTPServer) Inherit(superSpec *supervisor.Spec, previousGeneration supervisor.Object,
-	super *supervisor.Supervisor, muxMapper protocol.MuxMapper) {
-
+func (hs *HTTPServer) Inherit(superSpec *supervisor.Spec, previousGeneration supervisor.Object, muxMapper context.MuxMapper) {
 	hs.runtime = previousGeneration.(*HTTPServer).runtime
 
 	hs.runtime.eventChan <- &eventReload{
 		nextSuperSpec: superSpec,
-		super:         super,
 		muxMapper:     muxMapper,
 	}
 }

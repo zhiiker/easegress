@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,38 +18,37 @@
 package urlrule
 
 import (
-	"bytes"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/megaease/easegress/pkg/context"
-	"github.com/megaease/easegress/pkg/tracing"
+	"github.com/megaease/easegress/v2/pkg/util/stringtool"
 )
 
 func TestURLRULEMatch(t *testing.T) {
 	u := &URLRule{
+		id: "TestURLRULEMatch",
 		Methods: []string{
 			"GET",
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Prefix: "/",
 		},
 	}
 
-	u.Init()
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/user/api", bytes.NewReader(buff))
-	if err != nil {
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
+	}
+	if u.ID() != u.id {
+		t.Error("Rule ID is wrong")
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if !u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req is %#v, urlrule is %#v", ctx.Request(), u)
+	u.Init()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/user/api", nil)
+
+	if !u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req is %#v, urlrule is %#v", req, u)
 	}
 }
 
@@ -59,24 +58,21 @@ func TestURLRegxMatch(t *testing.T) {
 			"GET",
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			RegEx: "^\\/app\\/.+$",
 		},
 	}
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
+	}
+	u.URL.Init()
 
 	u.Init()
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
 
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/app/api", bytes.NewReader(buff))
-	if err != nil {
-		t.Error("create http failed, err: ", err)
-		return
-	}
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/app/api", nil)
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if !u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is regEx: %s", ctx.Request().Path(), u.URL.RegEx)
+	if !u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is regEx: %s", req.URL.Path, u.URL.RegEx)
 	}
 }
 
@@ -86,24 +82,20 @@ func TestURLExactMatch(t *testing.T) {
 			"GET",
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Exact: "/app/v2/user",
 		},
 	}
-
-	u.Init()
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/app/v2/user", bytes.NewReader(buff))
-	if err != nil {
-		t.Error("create http failed, err: ", err)
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if !u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", ctx.Request().Path(), u.URL.Exact)
+	u.Init()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/app/v2/user", nil)
+
+	if !u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", req.URL.Path, u.URL.Exact)
 	}
 }
 
@@ -113,24 +105,20 @@ func TestURLExactNotMatch(t *testing.T) {
 			"GET",
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Exact: "/app/v2/user",
 		},
 	}
-
-	u.Init()
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/app/v3/user", bytes.NewReader(buff))
-	if err != nil {
-		t.Error("create http failed, err: ", err)
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", ctx.Request().Path(), u.URL.Exact)
+	u.Init()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/app/v3/user", nil)
+
+	if u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", req.URL.Path, u.URL.Exact)
 	}
 }
 
@@ -140,24 +128,20 @@ func TestURLPrefixNotMatch(t *testing.T) {
 			"GET",
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Prefix: "/app/v3",
 		},
 	}
-
-	u.Init()
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/app/v2/user", bytes.NewReader(buff))
-	if err != nil {
-		t.Error("create http failed, err: ", err)
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", ctx.Request().Path(), u.URL.Exact)
+	u.Init()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/app/v2/user", nil)
+
+	if u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule is exact : %s", req.URL.Path, u.URL.Exact)
 	}
 }
 
@@ -166,21 +150,18 @@ func TestURLRULENoMatchMethod(t *testing.T) {
 		Methods: []string{
 			"DELETE",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Prefix: "/",
 		},
 	}
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/user/api", bytes.NewReader(buff))
-	if err != nil {
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req mehtod is %#v, urlrule method is required: %v", ctx.Request().Method(), u.Methods)
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/user/api", nil)
+
+	if u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req mehtod is %#v, urlrule method is required: %v", req.Method, u.Methods)
 	}
 }
 
@@ -189,20 +170,131 @@ func TestURLRULENoMatchURL(t *testing.T) {
 		Methods: []string{
 			"POST",
 		},
-		URL: StringMatch{
+		URL: stringtool.StringMatcher{
 			Exact: "/user",
 		},
 	}
-	buff := []byte("ok")
-	w := httptest.NewRecorder()
-
-	request, err := http.NewRequest(http.MethodPost, "http://localhost/user/api", bytes.NewReader(buff))
-	if err != nil {
-		return
+	if err := u.URL.Validate(); err != nil {
+		t.Error(err)
 	}
 
-	ctx := context.New(w, request, tracing.NoopTracing, "")
-	if u.Match(ctx.Request()) {
-		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule path is required exact : %s", ctx.Request().Path(), u.URL.Exact)
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/user/api", nil)
+
+	if u.Match(req) {
+		t.Errorf("match HTTP URL and Method failed, req path is %s, urlrule path is required exact : %s", req.URL.Path, u.URL.Exact)
+	}
+}
+
+func TestFailStringMatch(t *testing.T) {
+	sm := stringtool.StringMatcher{}
+
+	err := sm.Validate()
+	if err == nil {
+		t.Error("string matcher should be invalid")
+	}
+}
+
+func TestDeepEqual(t *testing.T) {
+	u1 := &URLRule{
+		id: "TestDeepEqual1",
+		Methods: []string{
+			"GET",
+			"POST",
+		},
+		URL: stringtool.StringMatcher{
+			Exact: "/app/v2/user",
+		},
+	}
+
+	u2 := &URLRule{
+		id: "TestDeepEqual2",
+		Methods: []string{
+			"GET",
+			"POST",
+		},
+		URL: stringtool.StringMatcher{
+			Exact: "/app/v2/user",
+		},
+	}
+
+	u3 := &URLRule{
+		id: "TestDeepEqual3",
+		Methods: []string{
+			"GET",
+			"POST",
+			"DELETE",
+		},
+		URL: stringtool.StringMatcher{
+			RegEx: "^/app/v2",
+		},
+	}
+	u4 := &URLRule{
+		id: "TestDeepEqual4",
+		Methods: []string{
+			"GET",
+			"POST",
+			"PATCH",
+		},
+		URL: stringtool.StringMatcher{
+			Prefix: "/app/v3/user",
+		},
+	}
+
+	u5 := &URLRule{
+		id: "TestDeepEqual1",
+		Methods: []string{
+			"GET",
+			"POST",
+		},
+		URL: stringtool.StringMatcher{
+			Exact: "/app/v3/user",
+		},
+	}
+
+	u6 := &URLRule{
+		id: "TestDeepEqual2",
+		Methods: []string{
+			"GET",
+			"POST",
+		},
+		URL: stringtool.StringMatcher{
+			Exact:  "/app/v2/user",
+			Prefix: "/app",
+		},
+	}
+
+	u7 := &URLRule{
+		id: "TestDeepEqual2",
+		Methods: []string{
+			"GET",
+			"POST",
+		},
+		URL: stringtool.StringMatcher{
+			Exact:  "/app/v2/user",
+			Prefix: "/app",
+			RegEx:  "^.*$",
+		},
+	}
+
+	if !u1.DeepEqual(u2) {
+		t.Errorf("%v and %v should be equal\n", u1, u2)
+	}
+	if u1.DeepEqual(u3) {
+		t.Errorf("%v and %v should not be equal\n", u1, u3)
+	}
+	if u3.DeepEqual(u4) {
+		t.Errorf("%v and %v should not be equal\n", u3, u4)
+	}
+
+	if u1.DeepEqual(u5) {
+		t.Errorf("%v and %v should not be equal\n", u1, u5)
+	}
+
+	if u1.DeepEqual(u6) {
+		t.Errorf("%v and %v should not be equal\n", u1, u6)
+	}
+
+	if u6.DeepEqual(u7) {
+		t.Errorf("%v and %v should not be equal\n", u6, u7)
 	}
 }

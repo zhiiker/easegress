@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,7 +44,7 @@ var (
 		"url":              _url,
 	}
 
-	urlCharsRegexp = regexp.MustCompile(`^[A-Za-z0-9\-_\.~]{1,253}$`)
+	urlCharsRegexp = regexp.MustCompile(`^[\p{L}0-9\-_\.~]{1,253}$`)
 )
 
 func getFormatFunc(format string) (FormatFunc, bool) {
@@ -74,7 +74,7 @@ func urlName(v interface{}) error {
 		return nil
 	}
 
-	return fmt.Errorf("invalid name format")
+	return fmt.Errorf("invalid name format: %s", v)
 }
 
 func httpMethod(v interface{}) error {
@@ -107,7 +107,7 @@ func httpMethodArray(v interface{}) error {
 
 func httpCode(v interface{}) error {
 	code := v.(int)
-	// Referece: https://tools.ietf.org/html/rfc7231#section-6
+	// Reference: https://tools.ietf.org/html/rfc7231#section-6
 	if code < 100 || code >= 600 {
 		return fmt.Errorf("invalid http code")
 	}

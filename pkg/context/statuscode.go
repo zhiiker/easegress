@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +19,7 @@ package context
 
 import "net/http"
 
+// the error code list which align with the HTTP status code
 const (
 	EGStatusContinue              = http.StatusContinue
 	EGStatusSwitchingProtocols    = http.StatusSwitchingProtocols
@@ -81,6 +82,7 @@ var (
 	}
 )
 
+// IsNetworkError returns if the error is network type.
 func IsNetworkError(code int) bool {
 	c, ok := statusCodeCategory[code]
 	return ok && (c&egNetworkError) != 0

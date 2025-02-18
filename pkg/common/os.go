@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,6 +22,7 @@ import (
 	"os"
 )
 
+// Exit the call exit system call with exit code and message
 func Exit(code int, msg string) {
 	if code != 0 {
 		if msg != "" {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,23 +15,24 @@
  * limitations under the License.
  */
 
+// Package jmxtool provides some tools for jmx
 package jmxtool
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v2"
+	"github.com/megaease/easegress/v2/pkg/util/codectool"
 )
 
-func JsonToKVMap(jsonStr string) (map[string]string, error) {
+// JSONToKVMap converts JSON string to key value pairs
+func JSONToKVMap(jsonStr string) (map[string]string, error) {
 	m := map[string]interface{}{}
-	err := json.Unmarshal([]byte(jsonStr), &m)
+	err := codectool.Unmarshal([]byte(jsonStr), &m)
 	if err != nil {
 		return nil, err
 	}
@@ -51,25 +52,24 @@ func JsonToKVMap(jsonStr string) (map[string]string, error) {
 func extractKVs(prefix string, obj interface{}) []map[string]string {
 	var rst []map[string]string
 
-	switch obj.(type) {
+	switch o := obj.(type) {
 	case map[string]interface{}:
-		for k, v := range obj.(map[string]interface{}) {
+		for k, v := range o {
 			current := k
 			rst = append(rst, extractKVs(join(prefix, current), v)...)
 		}
 
 	case []interface{}:
-		o := obj.([]interface{})
 		length := len(o)
 		for i := 0; i < length; i++ {
 			rst = append(rst, extractKVs(join(prefix, strconv.Itoa(i)), o[i])...)
 		}
 	case bool:
-		rst = append(rst, map[string]string{prefix: strconv.FormatBool(obj.(bool))})
+		rst = append(rst, map[string]string{prefix: strconv.FormatBool(o)})
 	case int:
-		rst = append(rst, map[string]string{prefix: strconv.Itoa(obj.(int))})
+		rst = append(rst, map[string]string{prefix: strconv.Itoa(o)})
 	case float64:
-		rst = append(rst, map[string]string{prefix: strconv.FormatFloat(obj.(float64), 'f', 0, 64)})
+		rst = append(rst, map[string]string{prefix: strconv.FormatFloat(o, 'f', 0, 64)})
 	default:
 		if obj == nil {
 			rst = append(rst, map[string]string{prefix: ""})
@@ -83,17 +83,17 @@ func extractKVs(prefix string, obj interface{}) []map[string]string {
 func join(prefix string, current string) string {
 	if prefix == "" {
 		return current
-	} else {
-		return strings.Join([]string{prefix, current}, ".")
 	}
+	return strings.Join([]string{prefix, current}, ".")
 }
 
+// APIErr is the error struct for API
 type APIErr struct {
-	Code    int    `yaml:"code"`
-	Message string `yaml:"message"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
-func handleRequest(httpMethod string, url string, reqBody []byte) (*http.Response, error) {
+func handleRequest(httpMethod string, url string, reqBody []byte) ([]byte, error) {
 	req, err := http.NewRequest(httpMethod, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
@@ -101,27 +101,27 @@ func handleRequest(httpMethod string, url string, reqBody []byte) (*http.Respons
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return resp, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return resp, err
+		return nil, err
 	}
 
-	if !successfulStatusCode(resp.StatusCode) {
-		msg := string(body)
-		apiErr := &APIErr{}
-		err = yaml.Unmarshal(body, apiErr)
-		if err == nil {
-			msg = apiErr.Message
-		}
-
-		return resp, fmt.Errorf("Request failed: Code: %d, Msg: %s ", resp.StatusCode, msg)
+	if successfulStatusCode(resp.StatusCode) {
+		return body, nil
 	}
 
-	return resp, nil
+	msg := string(body)
+	apiErr := &APIErr{}
+	err = codectool.Unmarshal(body, apiErr)
+	if err == nil {
+		msg = apiErr.Message
+	}
+
+	return nil, fmt.Errorf("Request failed: Code: %d, Msg: %s ", resp.StatusCode, msg)
 }
 
 func successfulStatusCode(code int) bool {

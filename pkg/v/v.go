@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,117 +15,91 @@
  * limitations under the License.
  */
 
+// Package v implements the common validation logic of Easegress.
 package v
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 
-	yamljsontool "github.com/ghodss/yaml"
-	genjs "github.com/megaease/jsonschema"
-	loadjs "github.com/xeipuuv/gojsonschema"
+	genjs "github.com/invopop/jsonschema"
+	loadjs "github.com/santhosh-tekuri/jsonschema/v5"
 
-	"github.com/megaease/easegress/pkg/util/jsontool"
+	"github.com/megaease/easegress/v2/pkg/util/codectool"
 )
 
 type (
 	schemaMeta struct {
-		schema *loadjs.Schema
+		genSchema  *genjs.Schema
+		loadSchema *loadjs.Schema
 
 		jsonFormat []byte
-		yamlFormat []byte
-	}
-	// ContentValidator is used to validate by data content.
-	ContentValidator interface {
-		Validate([]byte) error
 	}
 )
 
 var (
-	validateReflector = &genjs.Reflector{
-		DefinitionNameWithPackage:  true,
+	reflector = &genjs.Reflector{
 		AllowAdditionalProperties:  true,
 		RequiredFromJSONSchemaTags: true,
+		DoNotReference:             true,
+
+		// NOTE: true value will cause problems.
+		// ExpandedStruct:             true,
 	}
-	generateReflector = &genjs.Reflector{
-		DefinitionNameWithPackage:  true,
-		RequiredFromJSONSchemaTags: true,
-	}
-	reflectorSchemaMetas = map[*genjs.Reflector]map[reflect.Type]*schemaMeta{}
+	schemaMetasMutex = sync.Mutex{}
+	schemaMetas      = map[reflect.Type]*schemaMeta{}
 )
 
-// GetSchemaInYAML returns the json schema of t in yaml format.
-func GetSchemaInYAML(t reflect.Type) ([]byte, error) {
-	sm, err := getSchemaMeta(generateReflector, t)
+// GetSchema returns the json schema of t.
+func GetSchema(t reflect.Type) (*genjs.Schema, error) {
+	sm, err := getSchemaMeta(t)
 	if err != nil {
 		return nil, err
 	}
 
-	return sm.yamlFormat, nil
-}
-
-// GetSchemaInJSON return the json schema of t in json format.
-func GetSchemaInJSON(t reflect.Type) ([]byte, error) {
-	sm, err := getSchemaMeta(generateReflector, t)
-	if err != nil {
-		return nil, err
-	}
-
-	return sm.jsonFormat, nil
+	return sm.genSchema, nil
 }
 
 // Validate validates by json schema rules, custom formats and general methods.
-func Validate(v interface{}, yamlBuff []byte) *ValidateRecorder {
+func Validate(v interface{}) *ValidateRecorder {
 	vr := &ValidateRecorder{}
 
-	if yamlBuff != nil {
-		sm, err := getSchemaMeta(validateReflector, reflect.TypeOf(v))
-		if err != nil {
-			vr.recordSystem(fmt.Errorf("get schema meta for %T failed: %v", v, err))
-			return vr
-		}
-
-		jsonBuff, err := yamljsontool.YAMLToJSON(yamlBuff)
-		if err != nil {
-			vr.recordSystem(fmt.Errorf("transform %s to json failed: %v", yamlBuff, err))
-			return vr
-		}
-
-		trimJSONBuff, err := jsontool.TrimNull(jsonBuff)
-		if err != nil {
-			vr.recordSystem(fmt.Errorf("trim null from %s failed: %v", jsonBuff, err))
-			return vr
-		}
-
-		docLoader := loadjs.NewBytesLoader(trimJSONBuff)
-		result, err := sm.schema.Validate(docLoader)
-		vr.recordJSONSchema(result)
-
-		cv, ok := reflect.ValueOf(v).Interface().(ContentValidator)
-		if ok {
-			err = cv.Validate(yamlBuff)
-			if err != nil {
-				vr.GeneralErrs = append(vr.GeneralErrs, err.Error())
-			}
-			// if a custom ContentValidator is executed, `custom format validation` and `general validation` are not executed.
-			return vr
-		}
+	if v == nil {
+		vr.recordSystem(fmt.Errorf("nil value"))
 	}
 
+	jsonBuff, err := codectool.MarshalJSON(v)
+	if err != nil {
+		vr.recordSystem(fmt.Errorf("marshal %#v to json failed: %v", v, err))
+		return vr
+	}
+	var rawValue interface{}
+	err = codectool.Unmarshal(jsonBuff, &rawValue)
+	if err != nil {
+		vr.recordSystem(fmt.Errorf("unmarshal json %s failed: %v", jsonBuff, err))
+		return vr
+	}
+
+	sm, err := getSchemaMeta(reflect.TypeOf(v))
+	if err != nil {
+		vr.recordSystem(fmt.Errorf("get schema meta for %T failed: %v", v, err))
+		return vr
+	}
+
+	err = sm.loadSchema.Validate(rawValue)
+	vr.recordJSONSchema(err)
+
 	val := reflect.ValueOf(v)
-	traverseGo(&val, nil, vr.recordFormat)
-	traverseGo(&val, nil, vr.recordGeneral)
+	traverseGo(&val, nil, vr.record)
 
 	return vr
 }
 
-func getSchemaMeta(reflector *genjs.Reflector, t reflect.Type) (*schemaMeta, error) {
-	schemaMetas, exists := reflectorSchemaMetas[reflector]
-	if !exists {
-		schemaMetas = make(map[reflect.Type]*schemaMeta)
-		reflectorSchemaMetas[reflector] = schemaMetas
-	}
+func getSchemaMeta(t reflect.Type) (*schemaMeta, error) {
+	schemaMetasMutex.Lock()
+	defer schemaMetasMutex.Unlock()
+
 	sm, exists := schemaMetas[t]
 	if exists {
 		return sm, nil
@@ -134,27 +108,22 @@ func getSchemaMeta(reflector *genjs.Reflector, t reflect.Type) (*schemaMeta, err
 	var err error
 
 	sm = &schemaMeta{}
-	schema := reflector.ReflectFromType(t)
-	if _, ok := getFormatFunc(schema.Format); !ok {
-		return nil, fmt.Errorf("%v got unsupported format: %s", t, schema.Format)
+	sm.genSchema = reflector.ReflectFromType(t)
+	if _, ok := getFormatFunc(sm.genSchema.Format); !ok {
+		return nil, fmt.Errorf("%v got unsupported format: %s", t, sm.genSchema.Format)
 	}
-	for _, definition := range schema.Definitions {
+	for _, definition := range sm.genSchema.Definitions {
 		if _, ok := getFormatFunc(definition.Format); !ok {
 			return nil, fmt.Errorf("%v got unsupported format: %s", t, definition.Format)
 		}
 	}
 
-	sm.jsonFormat, err = json.Marshal(schema)
+	sm.jsonFormat, err = codectool.MarshalJSON(sm.genSchema)
 	if err != nil {
-		return nil, fmt.Errorf("marshal %#v to json failed: %v", sm.schema, err)
+		return nil, fmt.Errorf("marshal %#v to json failed: %v", sm.loadSchema, err)
 	}
 
-	sm.yamlFormat, err = yamljsontool.JSONToYAML(sm.jsonFormat)
-	if err != nil {
-		return nil, fmt.Errorf("transform json %s to yaml failed: %v", sm.jsonFormat, err)
-	}
-
-	sm.schema, err = loadjs.NewSchema(loadjs.NewBytesLoader(sm.jsonFormat))
+	sm.loadSchema, err = loadjs.CompileString(loadjs.Draft2020.String(), string(sm.jsonFormat))
 	if err != nil {
 		return nil, fmt.Errorf("new schema from %s failed: %v", sm.jsonFormat, err)
 	}
@@ -167,9 +136,9 @@ func getSchemaMeta(reflector *genjs.Reflector, t reflect.Type) (*schemaMeta, err
 // traverseGo recursively traverses the golang data structure with the rules below:
 //
 // 1. It traverses fields of the embedded struct.
-// 2. It does not traverse unexported subfields of the struct.
-// 3. It pass nil to the argument StructField when it's not a struct field.
-// 4. It stops when encoutering nil.
+// 2. It does not traverse unexposed subfields of the struct.
+// 3. It passes nil to the argument StructField when it's not a struct field.
+// 4. It stops when encountering nil.
 func traverseGo(val *reflect.Value, field *reflect.StructField, fn func(*reflect.Value, *reflect.StructField)) {
 	t := val.Type()
 
@@ -187,7 +156,7 @@ func traverseGo(val *reflect.Value, field *reflect.StructField, fn func(*reflect
 	case reflect.Struct:
 		for i := 0; i < t.NumField(); i++ {
 			subfield, subval := t.Field(i), val.Field(i)
-			// unexported
+			// unexposed
 			if subfield.PkgPath != "" {
 				continue
 			}

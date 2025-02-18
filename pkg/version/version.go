@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+// Package version defines the version of Easegress.
 package version
 
 import "fmt"
@@ -27,7 +28,10 @@ var (
 	// COMMIT returns the short sha from git
 	COMMIT = "UNKNOWN"
 
-	API   = "v1"
+	// API return the API version
+	API = "v1"
+	// Short return the short version
 	Short = fmt.Sprintf("Easegress %s", RELEASE)
-	Long  = fmt.Sprintf("Easegress release: %s, repo: %s, commit: %s", RELEASE, REPO, COMMIT)
+	// Long return the long version
+	Long = fmt.Sprintf("Easegress release: %s, repo: %s, commit: %s", RELEASE, REPO, COMMIT)
 )

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,15 +15,18 @@
  * limitations under the License.
  */
 
+// Package supervisor implements the supervisor of all objects.
 package supervisor
 
 import (
+	"fmt"
+	"os"
 	"runtime/debug"
 	"sync"
 
-	"github.com/megaease/easegress/pkg/cluster"
-	"github.com/megaease/easegress/pkg/logger"
-	"github.com/megaease/easegress/pkg/option"
+	"github.com/megaease/easegress/v2/pkg/cluster"
+	"github.com/megaease/easegress/v2/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/option"
 )
 
 const watcherName = "__SUPERVISOR__"
@@ -49,8 +52,32 @@ type (
 
 	// WalkFunc is the type of the function called for
 	// walking object entity.
-	WalkFunc func(objectEntity *ObjectEntity) bool
+	WalkFunc func(entity *ObjectEntity) bool
 )
+
+var globalSuper *Supervisor
+
+func GetGlobalSuper() *Supervisor {
+	return globalSuper
+}
+
+func loadInitialObjects(s *Supervisor, paths []string) map[string]string {
+	objs := map[string]string{}
+	for _, path := range paths {
+		data, e := os.ReadFile(path)
+		if e != nil {
+			logger.Errorf("failed to load initial object, path: %s, error: %v", path, e)
+			continue
+		}
+		spec, e := s.NewSpec(string(data))
+		if e != nil {
+			logger.Errorf("failed to create spec for initial object, path: %s, error: %v", path, e)
+			continue
+		}
+		objs[spec.Name()] = spec.JSONConfig()
+	}
+	return objs
+}
 
 // MustNew creates a Supervisor.
 func MustNew(opt *option.Options, cls cluster.Cluster) *Supervisor {
@@ -63,11 +90,15 @@ func MustNew(opt *option.Options, cls cluster.Cluster) *Supervisor {
 		done:            make(chan struct{}),
 	}
 
-	s.objectRegistry = newObjectRegistry(s)
+	initObjs := loadInitialObjects(s, opt.InitialObjectConfigFiles)
+
+	s.objectRegistry = newObjectRegistry(s, initObjs, opt.ObjectsDumpInterval)
 	s.watcher = s.objectRegistry.NewWatcher(watcherName, FilterCategory(
-		// NOTE: SystemController is only initilized internally.
-		// CategorySystemController,
+		// NOTE: SystemController is only initialized internally.
+		CategorySystemController,
 		CategoryBusinessController))
+
+	globalSuper = s
 
 	s.initSystemControllers()
 
@@ -100,16 +131,35 @@ func (s *Supervisor) initSystemControllers() {
 			Kind: kind,
 		}
 
-		spec := newSpecInternal(meta, rootObject.DefaultSpec())
+		spec := s.newSpecInternal(meta, rootObject.DefaultSpec())
 		entity, err := s.NewObjectEntityFromSpec(spec)
 		if err != nil {
 			panic(err)
 		}
 
+		logger.Infof("create %s", spec.Name())
+
 		entity.InitWithRecovery(nil /* muxMapper */)
 		s.systemControllers.Store(kind, entity)
 
-		logger.Infof("create %s", spec.Name())
+		s.syncSystemControllerInCluster(spec)
+	}
+}
+
+func (s *Supervisor) syncSystemControllerInCluster(spec *Spec) {
+	value, err := s.cls.Get(s.cls.Layout().ConfigObjectKey(spec.Name()))
+	if err != nil {
+		panic(err)
+	}
+
+	// NOTE: The spec is already in cluster.
+	if value != nil {
+		return
+	}
+
+	err = s.cls.Put(s.cls.Layout().ConfigObjectKey(spec.Name()), spec.JSONConfig())
+	if err != nil {
+		panic(err)
 	}
 }
 
@@ -140,40 +190,62 @@ func (s *Supervisor) handleEvent(event *ObjectEntityWatcherEvent) {
 			continue
 		}
 
-		entity.(*ObjectEntity).CloseWithRecovery()
 		logger.Infof("delete %s", name)
+		entity.(*ObjectEntity).CloseWithRecovery()
 	}
 
 	for name, entity := range event.Create {
-		_, exists := s.businessControllers.Load(name)
+		// This will be caused from the stored system controller spec while the system launching.
+		previousEntity, exists := s.systemControllers.Load(name)
+		if exists {
+			logger.Infof("update %s", name)
+			entity.InheritWithRecovery(previousEntity.(*ObjectEntity), nil /* muxMapper */)
+			s.systemControllers.Store(name, entity)
+			continue
+		}
+
+		_, exists = s.businessControllers.Load(name)
 		if exists {
 			logger.Errorf("BUG: create %s already existed", name)
 			continue
 		}
 
+		logger.Infof("create %s", name)
 		entity.InitWithRecovery(nil /* muxMapper */)
 		s.businessControllers.Store(name, entity)
-		logger.Infof("create %s", name)
 	}
 
 	for name, entity := range event.Update {
-		previousEntity, exists := s.businessControllers.Load(name)
+		isSystemController := false
+
+		previousEntity, exists := s.systemControllers.Load(name)
 		if !exists {
-			logger.Errorf("BUG: update %s not found", name)
-			continue
+			previousEntity, exists = s.businessControllers.Load(name)
+			if !exists {
+				logger.Errorf("BUG: update %s not found", name)
+				continue
+			}
+		} else {
+			isSystemController = true
 		}
 
-		entity.InheritWithRecovery(previousEntity.(*ObjectEntity), nil /* muxMapper */)
-		s.businessControllers.Store(name, entity)
 		logger.Infof("update %s", name)
+		entity.InheritWithRecovery(previousEntity.(*ObjectEntity), nil /* muxMapper */)
+
+		if isSystemController {
+			s.systemControllers.Store(name, entity)
+		} else {
+			s.businessControllers.Store(name, entity)
+		}
 	}
 }
 
+// ObjectRegistry returns the registry of object
 func (s *Supervisor) ObjectRegistry() *ObjectRegistry {
 	return s.objectRegistry
 }
 
-// WalkObjectEntitys walks every controllers until walkFn returns false.
+// WalkControllers walks every controllers until walkFn returns false.
 func (s *Supervisor) WalkControllers(walkFn WalkFunc) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -191,17 +263,33 @@ func (s *Supervisor) WalkControllers(walkFn WalkFunc) {
 	})
 }
 
-// GetObjectEntity returns the system controller with the existing flag.
+// MustGetSystemController wraps GetSystemController with panic.
+func (s *Supervisor) MustGetSystemController(name string) *ObjectEntity {
+	entity, exists := s.GetSystemController(name)
+	if !exists {
+		panic(fmt.Errorf("system controller %s not found", name))
+	}
+
+	return entity
+}
+
+// GetSystemController returns the system controller with the existing flag.
 // The name of system controller is its own kind.
 func (s *Supervisor) GetSystemController(name string) (*ObjectEntity, bool) {
 	entity, exists := s.systemControllers.Load(name)
-	return entity.(*ObjectEntity), exists
+	if !exists {
+		return nil, false
+	}
+	return entity.(*ObjectEntity), true
 }
 
-// GetObjectEntity returns the business controller with the existing flag.
+// GetBusinessController returns the business controller with the existing flag.
 func (s *Supervisor) GetBusinessController(name string) (*ObjectEntity, bool) {
 	entity, exists := s.businessControllers.Load(name)
-	return entity.(*ObjectEntity), exists
+	if !exists {
+		return nil, false
+	}
+	return entity.(*ObjectEntity), true
 }
 
 // FirstHandleDone returns the firstHandleDone channel,
@@ -223,17 +311,27 @@ func (s *Supervisor) close() {
 
 	s.businessControllers.Range(func(k, v interface{}) bool {
 		entity := v.(*ObjectEntity)
-		entity.CloseWithRecovery()
 		logger.Infof("delete %s", k)
+		entity.CloseWithRecovery()
 		return true
 	})
 
-	s.systemControllers.Range(func(k, v interface{}) bool {
-		entity := v.(*ObjectEntity)
-		entity.CloseWithRecovery()
-		logger.Infof("delete %s", k)
-		return true
-	})
+	for i := len(objectRegistryOrderByDependency) - 1; i >= 0; i-- {
+		rootObject := objectRegistryOrderByDependency[i]
+		if rootObject.Category() != CategorySystemController {
+			continue
+		}
+
+		kind := rootObject.Kind()
+		value, exists := s.systemControllers.LoadAndDelete(kind)
+		if !exists {
+			logger.Errorf("BUG: system controller %s not found", kind)
+			continue
+		}
+
+		logger.Infof("delete %s", kind)
+		value.(*ObjectEntity).CloseWithRecovery()
+	}
 
 	close(s.done)
 }

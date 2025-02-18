@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +18,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -25,10 +26,10 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/megaease/easegress/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/logger"
 )
 
-func (s *Server) newAPILogger(next http.Handler) http.Handler {
+func (m *dynamicMux) newAPILogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
@@ -42,7 +43,7 @@ func (s *Server) newAPILogger(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) newRecoverer(next http.Handler) http.Handler {
+func (m *dynamicMux) newRecoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rvr := recover(); rvr != nil && rvr != http.ErrAbortHandler {
@@ -60,11 +61,36 @@ func (s *Server) newRecoverer(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) newConfigVersionAttacher(next http.Handler) http.Handler {
+func (m *dynamicMux) basicAuth(realm string, creds map[string]string) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, pass, ok := r.BasicAuth()
+			if !ok {
+				m.basicAuthFailed(w, r, realm)
+				return
+			}
+
+			credPass, credUserOk := creds[user]
+			if !credUserOk || subtle.ConstantTimeCompare([]byte(pass), []byte(credPass)) != 1 {
+				m.basicAuthFailed(w, r, realm)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func (m *dynamicMux) basicAuthFailed(w http.ResponseWriter, r *http.Request, realm string) {
+	w.Header().Add("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
+	HandleAPIError(w, r, http.StatusUnauthorized, fmt.Errorf("basic auth failed"))
+}
+
+func (m *dynamicMux) newConfigVersionAttacher(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// NOTE: It needs to add the header before the next handlers
 		// write the body to the network.
-		version := s._getVersion()
+		version := m.server._getVersion()
 		w.Header().Set(ConfigVersionKey, fmt.Sprintf("%d", version))
 		next.ServeHTTP(w, r)
 	})

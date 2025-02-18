@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,7 +22,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/megaease/easegress/pkg/protocol"
+	"github.com/megaease/easegress/v2/pkg/context"
 )
 
 type (
@@ -57,17 +57,18 @@ type (
 		Timestamp int64
 	}
 
+	// TrafficObject is the object of Traffic
 	TrafficObject interface {
 		Object
 
-		// Init initializes the Obejct.
-		Init(superSpec *Spec, super *Supervisor, muxMapper protocol.MuxMapper)
+		// Init initializes the Object.
+		Init(superSpec *Spec, muxMapper context.MuxMapper)
 
 		// Inherit also initializes the Object.
 		// But it needs to handle the lifecycle of the previous generation.
 		// So it's own responsibility for the object to inherit and clean the previous generation stuff.
 		// The supervisor won't call Close for the previous generation.
-		Inherit(superSpec *Spec, previousGeneration Object, super *Supervisor, muxMapper protocol.MuxMapper)
+		Inherit(superSpec *Spec, previousGeneration Object, muxMapper context.MuxMapper)
 	}
 
 	// TrafficGate is the object in category of TrafficGate.
@@ -84,14 +85,14 @@ type (
 	Controller interface {
 		Object
 
-		// Init initializes the Obejct.
-		Init(superSpec *Spec, super *Supervisor)
+		// Init initializes the Object.
+		Init(superSpec *Spec)
 
 		// Inherit also initializes the Object.
 		// But it needs to handle the lifecycle of the previous generation.
 		// So it's own responsibility for the object to inherit and clean the previous generation stuff.
 		// The supervisor won't call Close for the previous generation.
-		Inherit(superSpec *Spec, previousGeneration Object, super *Supervisor)
+		Inherit(superSpec *Spec, previousGeneration Object)
 	}
 
 	// ObjectCategory is the type to classify all objects.
@@ -127,10 +128,10 @@ var (
 	objectRegistry = map[string]Object{}
 
 	// objectRegistryOrderByDependency is sorted by object dependency.
-	// The reason is whtat object dependencies follow the package imports sequence.
+	// The reason is that object dependencies follow the package imports sequence.
 	// It aims to initialize system controllers which depend others in right sequence.
 	//
-	// FIXME: Do we need an explicit table to specify the dependecy.
+	// FIXME: Do we need an explicit table to specify the dependency.
 	// Because it can get the controller without importing its package.
 	objectRegistryOrderByDependency = []Object{}
 )
@@ -147,6 +148,14 @@ func ObjectKinds() []string {
 	return kinds
 }
 
+// GetObject returns object by kind.
+func GetObject(kind string) Object {
+	return objectRegistry[kind]
+}
+
+// TrafficObjectKinds is a map that contains all kinds of TrafficObject.
+var TrafficObjectKinds = make(map[string]struct{})
+
 // Register registers object.
 func Register(o Object) {
 	if o.Kind() == "" {
@@ -157,13 +166,14 @@ func Register(o Object) {
 	case CategoryBusinessController, CategorySystemController:
 		_, ok := o.(Controller)
 		if !ok {
-			panic(fmt.Errorf("%s: not satisfies interface Controller", o.Kind()))
+			panic(fmt.Errorf("%s: doesn't implement interface Controller", o.Kind()))
 		}
 	case CategoryPipeline, CategoryTrafficGate:
 		_, ok := o.(TrafficObject)
 		if !ok {
-			panic(fmt.Errorf("%s: not satisfies interface TrafficObject", o.Kind()))
+			panic(fmt.Errorf("%s: doesn't implement interface TrafficObject", o.Kind()))
 		}
+		TrafficObjectKinds[o.Kind()] = struct{}{}
 	}
 
 	existedObject, existed := objectRegistry[o.Kind()]

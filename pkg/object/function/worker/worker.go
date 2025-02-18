@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://wwww.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+// Package worker provides the worker for FaaSController.
 package worker
 
 import (
@@ -22,17 +23,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/megaease/easegress/pkg/logger"
-	"github.com/megaease/easegress/pkg/object/function/provider"
-	"github.com/megaease/easegress/pkg/object/function/spec"
-	"github.com/megaease/easegress/pkg/object/function/storage"
-	"github.com/megaease/easegress/pkg/supervisor"
+	"github.com/megaease/easegress/v2/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/object/function/provider"
+	"github.com/megaease/easegress/v2/pkg/object/function/spec"
+	"github.com/megaease/easegress/v2/pkg/object/function/storage"
+	"github.com/megaease/easegress/v2/pkg/supervisor"
 )
 
 type (
+	// Worker stores the worker information
 	Worker struct {
 		mutex     sync.RWMutex
-		super     *supervisor.Supervisor
 		superSpec *supervisor.Spec
 
 		name string
@@ -49,15 +50,14 @@ type (
 	}
 )
 
-// newWorker return a worker
-func NewWorker(superSpec *supervisor.Spec, super *supervisor.Supervisor) *Worker {
-	store := storage.NewStorage(superSpec.Name(), super.Cluster())
+// NewWorker return a worker
+func NewWorker(superSpec *supervisor.Spec) *Worker {
+	store := storage.NewStorage(superSpec.Name(), superSpec.Super().Cluster())
 	faasProvider := provider.NewProvider(superSpec)
-	ingress := newIngressServer(superSpec, super, superSpec.Name())
+	ingress := newIngressServer(superSpec, superSpec.Name())
 	adm := superSpec.ObjectSpec().(*spec.Admin)
 
 	w := &Worker{
-		super:        super,
 		superSpec:    superSpec,
 		store:        store,
 		name:         superSpec.Name(),

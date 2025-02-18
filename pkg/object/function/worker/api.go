@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,41 +19,51 @@ package worker
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"gopkg.in/yaml.v2"
 
-	"github.com/megaease/easegress/pkg/api"
-	"github.com/megaease/easegress/pkg/logger"
-	"github.com/megaease/easegress/pkg/object/function/spec"
-	"github.com/megaease/easegress/pkg/object/function/storage"
-	"github.com/megaease/easegress/pkg/v"
+	"github.com/megaease/easegress/v2/pkg/api"
+	"github.com/megaease/easegress/v2/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/object/function/spec"
+	"github.com/megaease/easegress/v2/pkg/object/function/storage"
+	"github.com/megaease/easegress/v2/pkg/util/codectool"
+	"github.com/megaease/easegress/v2/pkg/v"
 )
 
 var (
 	errFunctionNotFound     = fmt.Errorf("can't find function")
 	errFunctionAlreadyExist = fmt.Errorf("function already exist")
-	startMsg                = []byte("function has been started, please wait for system truing it into active status")
+	startMsg                = []byte("function has been started, please wait for system turning it into active status")
 )
 
 func (worker *Worker) faasAPIPrefix() string {
 	return fmt.Sprintf("/faas/%s", worker.name)
 }
 
+const apiGroupName = "faas_admin"
+
 func (worker *Worker) registerAPIs() {
-	meshAPIs := []*api.APIEntry{
-		{Path: worker.faasAPIPrefix(), Method: "POST", Handler: worker.Create},
-		{Path: worker.faasAPIPrefix(), Method: "GET", Handler: worker.List},
-		{Path: worker.faasAPIPrefix() + "/{name}", Method: "GET", Handler: worker.Get},
-		{Path: worker.faasAPIPrefix() + "/{name}/start", Method: "PUT", Handler: worker.Start},
-		{Path: worker.faasAPIPrefix() + "/{name}/stop", Method: "PUT", Handler: worker.Stop},
-		{Path: worker.faasAPIPrefix() + "/{name}", Method: "DELETE", Handler: worker.Delete},
-		{Path: worker.faasAPIPrefix() + "/{name}", Method: "PUT", Handler: worker.Update},
+	group := &api.Group{
+		Group: apiGroupName,
+		Entries: []*api.Entry{
+			{Path: worker.faasAPIPrefix(), Method: "POST", Handler: worker.Create},
+			{Path: worker.faasAPIPrefix(), Method: "GET", Handler: worker.List},
+			{Path: worker.faasAPIPrefix() + "/{name}", Method: "GET", Handler: worker.Get},
+			{Path: worker.faasAPIPrefix() + "/{name}/start", Method: "PUT", Handler: worker.Start},
+			{Path: worker.faasAPIPrefix() + "/{name}/stop", Method: "PUT", Handler: worker.Stop},
+			{Path: worker.faasAPIPrefix() + "/{name}", Method: "DELETE", Handler: worker.Delete},
+			{Path: worker.faasAPIPrefix() + "/{name}", Method: "PUT", Handler: worker.Update},
+		},
 	}
 
-	api.GlobalServer.RegisterAPIs(meshAPIs)
+	api.RegisterAPIs(group)
+}
+
+// UnregisterAPIs unregister APIs
+func (worker *Worker) UnregisterAPIs() {
+	api.UnregisterAPIs(apiGroupName)
 }
 
 func (worker *Worker) readFunctionName(w http.ResponseWriter, r *http.Request) (string, error) {
@@ -65,6 +75,7 @@ func (worker *Worker) readFunctionName(w http.ResponseWriter, r *http.Request) (
 	return serviceName, nil
 }
 
+// Create deals with HTTP POST method
 func (worker *Worker) Create(w http.ResponseWriter, r *http.Request) {
 	spec := &spec.Spec{}
 	err := worker.readAPISpec(w, r, spec)
@@ -109,16 +120,16 @@ func (worker *Worker) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (worker *Worker) readAPISpec(w http.ResponseWriter, r *http.Request, spec interface{}) error {
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return fmt.Errorf("read body failed: %v", err)
 	}
-	err = yaml.Unmarshal(body, spec)
+	err = codectool.Unmarshal(body, spec)
 	if err != nil {
-		return fmt.Errorf("unmarshal failed: %v", err)
+		return fmt.Errorf("unmarshal to json failed: %v", err)
 	}
 
-	vr := v.Validate(spec, body)
+	vr := v.Validate(spec)
 	if !vr.Valid() {
 		return fmt.Errorf("validate failed: \n%s", vr.Error())
 	}
@@ -147,7 +158,11 @@ func (worker *Worker) updateState(w http.ResponseWriter, r *http.Request, event 
 	if !stateUpdated {
 		return
 	}
-	worker.store.Lock()
+	err = worker.store.Lock()
+	if err != nil {
+		api.HandleAPIError(w, r, http.StatusInternalServerError, err)
+		return
+	}
 	defer worker.store.Unlock()
 	err = worker.updateFunctionStatus(function.Status)
 	if err != nil {
@@ -157,6 +172,7 @@ func (worker *Worker) updateState(w http.ResponseWriter, r *http.Request, event 
 	return
 }
 
+// Stop is a stop API which deals with HTTP PUT method
 func (worker *Worker) Stop(w http.ResponseWriter, r *http.Request) {
 	name, err := worker.updateState(w, r, spec.StopEvent)
 	if err != nil {
@@ -166,6 +182,7 @@ func (worker *Worker) Stop(w http.ResponseWriter, r *http.Request) {
 	worker.ingress.Stop(name)
 }
 
+// Start is a start API which deals with HTTP PUT method
 func (worker *Worker) Start(w http.ResponseWriter, r *http.Request) {
 	name, err := worker.updateState(w, r, spec.StartEvent)
 	if err != nil {
@@ -177,6 +194,7 @@ func (worker *Worker) Start(w http.ResponseWriter, r *http.Request) {
 	w.Write(startMsg)
 }
 
+// Delete deals with HTTP DELETE
 func (worker *Worker) Delete(w http.ResponseWriter, r *http.Request) {
 	name, err := worker.readFunctionName(w, r)
 	if err != nil {
@@ -192,7 +210,11 @@ func (worker *Worker) Delete(w http.ResponseWriter, r *http.Request) {
 		api.HandleAPIError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	worker.Lock()
+	err = worker.Lock()
+	if err != nil {
+		api.HandleAPIError(w, r, http.StatusInternalServerError, err)
+		return
+	}
 	defer worker.Unlock()
 
 	// delete function in FaaS Provider
@@ -212,6 +234,7 @@ func (worker *Worker) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// List deals with HTTP GET method
 func (worker *Worker) List(w http.ResponseWriter, r *http.Request) {
 	functions, err := worker.listFunctions()
 	if err != nil {
@@ -219,16 +242,17 @@ func (worker *Worker) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buff, err := yaml.Marshal(functions)
+	buff, err := codectool.MarshalJSON(functions)
 	if err != nil {
-		api.HandleAPIError(w, r, http.StatusBadRequest, fmt.Errorf("marshal %#v to yaml failed: %v", functions, err))
+		api.HandleAPIError(w, r, http.StatusBadRequest, fmt.Errorf("marshal %#v to json failed: %v", functions, err))
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/vnd.yaml")
+	w.Header().Set("Content-Type", "application/json")
 	w.Write(buff)
 }
 
+// Update deals with HTTP PUT method
 func (worker *Worker) Update(w http.ResponseWriter, r *http.Request) {
 	funcSpec := &spec.Spec{}
 	err := worker.readAPISpec(w, r, funcSpec)
@@ -283,6 +307,7 @@ func (worker *Worker) Update(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Get deals with HTTP GET method request
 func (worker *Worker) Get(w http.ResponseWriter, r *http.Request) {
 	name, err := worker.readFunctionName(w, r)
 	if err != nil {
@@ -295,14 +320,16 @@ func (worker *Worker) Get(w http.ResponseWriter, r *http.Request) {
 		logger.Errorf("create function with bad request: %v", err)
 		return
 	}
+
 	// no display
 	function.Fsm = nil
-	buff, err := yaml.Marshal(function)
+
+	buff, err := codectool.MarshalJSON(function)
 	if err != nil {
-		api.HandleAPIError(w, r, http.StatusBadRequest, fmt.Errorf("marshal %#v to yaml failed: %v", function, err))
+		api.HandleAPIError(w, r, http.StatusBadRequest, fmt.Errorf("marshal %#v to json failed: %v", function, err))
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/vnd.yaml")
+	w.Header().Set("Content-Type", "application/json")
 	w.Write(buff)
 }

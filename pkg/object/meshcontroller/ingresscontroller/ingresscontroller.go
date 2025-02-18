@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,20 +15,22 @@
  * limitations under the License.
  */
 
+// Package ingresscontroller implements the ingress controller for service mesh.
 package ingresscontroller
 
 import (
 	"fmt"
+	"os"
 	"runtime/debug"
 	"sync"
 
-	"github.com/megaease/easegress/pkg/logger"
-	"github.com/megaease/easegress/pkg/object/meshcontroller/informer"
-	"github.com/megaease/easegress/pkg/object/meshcontroller/service"
-	"github.com/megaease/easegress/pkg/object/meshcontroller/spec"
-	"github.com/megaease/easegress/pkg/object/meshcontroller/storage"
-	"github.com/megaease/easegress/pkg/object/trafficcontroller"
-	"github.com/megaease/easegress/pkg/supervisor"
+	"github.com/megaease/easegress/v2/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/object/meshcontroller/informer"
+	"github.com/megaease/easegress/v2/pkg/object/meshcontroller/service"
+	"github.com/megaease/easegress/v2/pkg/object/meshcontroller/spec"
+	"github.com/megaease/easegress/v2/pkg/object/meshcontroller/storage"
+	"github.com/megaease/easegress/v2/pkg/object/trafficcontroller"
+	"github.com/megaease/easegress/v2/pkg/supervisor"
 )
 
 type (
@@ -36,30 +38,30 @@ type (
 	IngressController struct {
 		mutex sync.RWMutex
 
-		super     *supervisor.Supervisor
 		superSpec *supervisor.Spec
 		spec      *spec.Admin
 
-		tc            *trafficcontroller.TrafficController
-		namespace     string
-		httpServer    *supervisor.ObjectEntity
-		httpPipelines map[string]*supervisor.ObjectEntity
-		service       *service.Service
-		informer      informer.Informer
+		informer   informer.Informer
+		service    *service.Service
+		tc         *trafficcontroller.TrafficController
+		instanceID string
+		IP         string
+		namespace  string
 
-		addServiceEvent    chan string
-		removeServiceEvent chan string
-		done               chan struct{}
+		httpServer *supervisor.ObjectEntity
+		// key is the backend name instead of pipeline name.
+		backendPipelines map[string]*supervisor.ObjectEntity
+		ingressBackends  map[string]struct{}
+		ingressRules     []*spec.IngressRule
 	}
-)
 
-const (
-	serviceEventChanSize = 100
+	// Status is the traffic controller status
+	Status = trafficcontroller.NamespacesStatus
 )
 
 // New creates a mesh ingress controller.
-func New(superSpec *supervisor.Spec, super *supervisor.Supervisor) *IngressController {
-	entity, exists := super.GetSystemController(trafficcontroller.Kind)
+func New(superSpec *supervisor.Spec) *IngressController {
+	entity, exists := superSpec.Super().GetSystemController(trafficcontroller.Kind)
 	if !exists {
 		panic(fmt.Errorf("BUG: traffic controller not found"))
 	}
@@ -69,48 +71,243 @@ func New(superSpec *supervisor.Spec, super *supervisor.Supervisor) *IngressContr
 		panic(fmt.Errorf("BUG: want *TrafficController, got %T", entity.Instance()))
 	}
 
-	store := storage.New(superSpec.Name(), super.Cluster())
+	store := storage.New(superSpec.Name(), superSpec.Super().Cluster())
+
+	instanceID := os.Getenv(spec.PodEnvHostname)
+	applicationIP := os.Getenv(spec.PodEnvApplicationIP)
+
+	if len(instanceID) == 0 || len(applicationIP) == 0 {
+		panic(fmt.Errorf("Need environment HOSTNAME: %s and APPLICATIONIP: %sto start ingress controller", instanceID, applicationIP))
+	}
 
 	ic := &IngressController{
-		super:     super,
 		superSpec: superSpec,
 		spec:      superSpec.ObjectSpec().(*spec.Admin),
 
-		tc:            tc,
-		namespace:     fmt.Sprintf("%s/%s", superSpec.Name(), "ingresscontroller"),
-		httpPipelines: make(map[string]*supervisor.ObjectEntity),
-		service:       service.New(superSpec, store),
-		informer:      informer.NewInformer(store),
+		informer:  informer.NewInformer(store, ""),
+		service:   service.New(superSpec),
+		tc:        tc,
+		namespace: superSpec.Name(),
 
-		addServiceEvent:    make(chan string, serviceEventChanSize),
-		removeServiceEvent: make(chan string, serviceEventChanSize),
-		done:               make(chan struct{}),
+		backendPipelines: make(map[string]*supervisor.ObjectEntity),
+		ingressBackends:  make(map[string]struct{}),
+		ingressRules:     []*spec.IngressRule{},
+		instanceID:       instanceID,
+		IP:               applicationIP,
 	}
 
-	ic.applyHTTPServer()
+	ic.putIngressControllerInstance()
 
-	go ic.watchEvent()
+	err := ic.informer.OnAllIngressSpecs(ic.handleIngresses)
+	if err != nil && err != informer.ErrAlreadyWatched {
+		logger.Errorf("watch ingress failed: %v", err)
+	}
+
+	err = ic.informer.OnAllServiceSpecs(ic.handleServices)
+	if err != nil && err != informer.ErrAlreadyWatched {
+		logger.Errorf("watch service failed: %v", err)
+	}
+
+	err = ic.informer.OnAllServiceInstanceSpecs(ic.handleServiceInstances)
+	if err != nil && err != informer.ErrAlreadyWatched {
+		logger.Errorf("watch service instance failed: %v", err)
+	}
+
+	// using informer for watching ingress cert
+	err = ic.informer.OnIngressControllerCert(ic.instanceID, ic.handleCert)
+	if err != nil && err != informer.ErrAlreadyWatched {
+		logger.Errorf("watch ingress controller cert failed: %v", err)
+	}
+
+	if err := ic.informer.OnAllServiceCanaries(ic.handleServiceCanaries); err != nil {
+		if err != informer.ErrAlreadyWatched {
+			logger.Errorf("add service canary failed: %v", err)
+		}
+	}
+
+	ic.reloadTraffic()
 
 	return ic
 }
 
-// applyHTTPServer applies HTTPServer to its latest status.
-func (ic *IngressController) applyHTTPServer() {
-	var rules []*spec.IngressRule
-	ingresses := ic.service.ListIngressSpecs()
-	for _, ingress := range ingresses {
-		for i := range ingress.Rules {
-			rules = append(rules, &ingress.Rules[i])
+func (ic *IngressController) putIngressControllerInstance() {
+	instance := &spec.ServiceInstanceSpec{
+		RegistryName: "",
+		ServiceName:  spec.IngressControllerName,
+		InstanceID:   ic.instanceID,
+		IP:           ic.IP,
+		Status:       spec.ServiceStatusUp,
+	}
+	ic.service.PutIngressControllerInstanceSpec(instance)
+}
+
+func (ic *IngressController) handleIngresses(ingresses map[string]*spec.Ingress) (continueWatch bool) {
+	continueWatch = true
+
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Errorf("%s: handleIngress recover from: %v, stack trace:\n%s\n",
+				ic.superSpec.Name(), err, debug.Stack())
+		}
+	}()
+
+	ic.reloadTraffic()
+
+	return
+}
+
+func (ic *IngressController) handleCert(event informer.Event, cert *spec.Certificate) (continueWatch bool) {
+	continueWatch = true
+
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Errorf("%s: handleIngress recover from: %v, stack trace:\n%s\n",
+				ic.superSpec.Name(), err, debug.Stack())
+		}
+	}()
+
+	ic.reloadTraffic()
+	return
+}
+
+func (ic *IngressController) handleServices(services map[string]*spec.Service) (continueWatch bool) {
+	continueWatch = true
+
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Errorf("%s: handleService recover from: %v, stack trace:\n%s\n",
+				ic.superSpec.Name(), err, debug.Stack())
+		}
+	}()
+
+	ic.reloadTraffic()
+
+	return
+}
+
+func (ic *IngressController) handleServiceInstances(serviceInstances map[string]*spec.ServiceInstanceSpec) (continueWatch bool) {
+	continueWatch = true
+
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Errorf("%s: handleServiceInstance recover from: %v, stack trace:\n%s\n",
+				ic.superSpec.Name(), err, debug.Stack())
+		}
+	}()
+
+	ic.reloadTraffic()
+
+	return
+}
+
+func (ic *IngressController) handleServiceCanaries(serviceCanaries map[string]*spec.ServiceCanary) (continueWatch bool) {
+	continueWatch = true
+
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Errorf("%s: handleServiceCanaries recover from: %v, stack trace:\n%s\n",
+				ic.superSpec.Name(), err, debug.Stack())
+		}
+	}()
+
+	ic.reloadTraffic()
+
+	return
+}
+
+func (ic *IngressController) reloadTraffic() {
+	ic.mutex.Lock()
+	defer ic.mutex.Unlock()
+
+	ic._reloadIngress()
+	ic._reloadPipelines()
+	ic._reloadHTTPServer()
+}
+
+func (ic *IngressController) _reloadIngress() {
+	ingressBackends, ingressRules := make(map[string]struct{}), []*spec.IngressRule{}
+	for _, ingress := range ic.service.ListIngressSpecs() {
+		for _, rule := range ingress.Rules {
+			for _, path := range rule.Paths {
+				ingressBackends[path.Backend] = struct{}{}
+				serviceSpec := &spec.Service{
+					Name: path.Backend,
+				}
+				path.Backend = serviceSpec.IngressControllerPipelineName()
+			}
+
+			ingressRules = append(ingressRules, rule)
 		}
 	}
 
-	superSpec, err := spec.IngressHTTPServerSpec(ic.spec.IngressPort, rules)
+	ic.ingressBackends, ic.ingressRules = ingressBackends, ingressRules
+}
+
+func (ic *IngressController) _reloadPipelines() {
+	for backend, entity := range ic.backendPipelines {
+		if _, exists := ic.ingressBackends[backend]; !exists {
+			err := ic.tc.DeletePipeline(ic.namespace, entity.Spec().Name())
+			if err != nil {
+				logger.Errorf("delete http pipeline %s failed: %v",
+					entity.Spec().Name(), err)
+			}
+			delete(ic.backendPipelines, backend)
+		}
+	}
+
+	// if in mTLS strict model, should init pipeline with certificates
+	admSpec := ic.superSpec.ObjectSpec().(*spec.Admin)
+	var cert, rootCert *spec.Certificate
+	if admSpec.EnablemTLS() {
+		cert = ic.service.GetIngressControllerInstanceCert(ic.instanceID)
+		rootCert = ic.service.GetRootCert()
+	}
+
+	canaries := ic.service.ListServiceCanaries()
+	for _, serviceSpec := range ic.service.ListServiceSpecs() {
+		if _, exists := ic.ingressBackends[serviceSpec.BackendName()]; !exists {
+			continue
+		}
+
+		instanceSpecs := ic.service.ListServiceInstanceSpecs(serviceSpec.Name)
+		if len(instanceSpecs) == 0 {
+			continue
+		}
+		upInstance := 0
+		for _, instanceSpec := range instanceSpecs {
+			if instanceSpec.Status == spec.ServiceStatusUp {
+				upInstance++
+			}
+		}
+		if upInstance == 0 {
+			continue
+		}
+
+		superSpec, err := serviceSpec.IngressControllerPipelineSpec(instanceSpecs, canaries, cert, rootCert)
+		if err != nil {
+			logger.Errorf("get ingress pipeline for %s failed: %v",
+				serviceSpec.Name, err)
+			continue
+		}
+
+		entity, err := ic.tc.ApplyPipelineForSpec(ic.namespace, superSpec)
+		if err != nil {
+			logger.Errorf("apply http pipeline %s failed: %v", superSpec.Name(), err)
+			continue
+		}
+
+		ic.backendPipelines[serviceSpec.BackendName()] = entity
+	}
+}
+
+func (ic *IngressController) _reloadHTTPServer() {
+	superSpec, err := spec.IngressControllerHTTPServerSpec(ic.spec.IngressPort, ic.ingressRules)
 	if err != nil {
 		logger.Errorf("get ingress http server spec failed: %v", err)
 		return
 	}
 
-	entity, err := ic.tc.ApplyHTTPServerForSpec(ic.namespace, superSpec)
+	entity, err := ic.tc.ApplyTrafficGateForSpec(ic.namespace, superSpec)
 	if err != nil {
 		logger.Errorf("apply http server failed: %v", err)
 		return
@@ -119,180 +316,18 @@ func (ic *IngressController) applyHTTPServer() {
 	ic.httpServer = entity
 }
 
-func (ic *IngressController) applyPipeline(serviceName string) {
-	service := ic.service.GetServiceSpec(serviceName)
-	if service == nil {
-		logger.Errorf("service spec %s not found", serviceName)
-		return
-	}
-
-	instanceSpecs := ic.service.ListServiceInstanceSpecs(serviceName)
-	if len(instanceSpecs) == 0 {
-		logger.Errorf("service %s got 0 instances", serviceName)
-		return
-	}
-
-	superSpec, err := service.IngressPipelineSpec(instanceSpecs)
-	if err != nil {
-		logger.Errorf("get pipeline spec %s failed: %v", serviceName, err)
-		return
-	}
-
-	entity, err := ic.tc.ApplyHTTPPipelineForSpec(ic.namespace, superSpec)
-	if err != nil {
-		logger.Errorf("apply pipeline %s failed: %v", superSpec.Name(), err)
-		return
-	}
-
-	ic.httpPipelines[superSpec.Name()] = entity
-}
-
-func (ic *IngressController) deletePipeline(serviceName string) {
-	ic.mutex.Lock()
-	defer ic.mutex.Unlock()
-
-	service := ic.service.GetServiceSpec(serviceName)
-	if service == nil {
-		logger.Errorf("service spec %s not found", serviceName)
-		return
-	}
-
-	err := ic.tc.DeleteHTTPPipeline(ic.namespace, service.IngressPipelineName())
-	if err != nil {
-		logger.Errorf("delete http pipeline failed: %v", err)
-		return
-	}
-
-	delete(ic.httpPipelines, service.IngressPipelineName())
-}
-
-func (ic *IngressController) recover() {
-	if err := recover(); err != nil {
-		const format = "%s: recover from: %v, stack trace:\n%s\n"
-		logger.Errorf(format, ic.superSpec.Name(), err, debug.Stack())
-	}
-}
-
-func (ic *IngressController) watchIngress() {
-	handler := func(ingresses map[string]*spec.Ingress) (continueWatch bool) {
-		continueWatch = true
-		defer ic.recover()
-
-		logger.Infof("handle informer ingress update event: %#v", ingresses)
-
-		services := make(map[string]struct{})
-		for _, ingress := range ingresses {
-			for i := range ingress.Rules {
-				r := &ingress.Rules[i]
-				for j := range r.Paths {
-					p := &r.Paths[j]
-					services[p.Backend] = struct{}{}
-				}
-			}
-		}
-
-		ic.mutex.Lock()
-		defer ic.mutex.Unlock()
-
-		ic.applyHTTPServer()
-		for _, entity := range ic.tc.ListHTTPPipelines(ic.namespace) {
-			name := entity.Spec().Name()
-			if _, exists := services[name]; !exists {
-				ic.removeServiceEvent <- name
-			}
-		}
-
-		return
-	}
-
-	err := ic.informer.OnIngressSpecs(handler)
-	if err != nil && err != informer.ErrAlreadyWatched {
-		logger.Errorf("add scope watching ingress failed: %v", err)
-	}
-}
-
-func (ic *IngressController) stopWatchService(name string) {
-	logger.Infof("stop watching service %s as it is removed from all ingress rules", name)
-	ic.informer.StopWatchServiceSpec(name, informer.AllParts)
-	ic.informer.StopWatchServiceInstanceSpec(name)
-}
-
-func (ic *IngressController) watchService(name string) {
-	handleSerivceSpec := func(event informer.Event, service *spec.Service) (continueWatch bool) {
-		continueWatch = true
-		defer ic.recover()
-
-		switch event.EventType {
-		case informer.EventDelete:
-			logger.Infof("handle informer service: %s's spec delete event", name)
-			ic.deletePipeline(name)
-			return false
-
-		case informer.EventUpdate:
-			logger.Infof("handle informer service: %s's spec update event", name)
-			ic.applyPipeline(service.Name)
-		}
-
-		return
-	}
-
-	err := ic.informer.OnPartOfServiceSpec(name, informer.AllParts, handleSerivceSpec)
-	if err != nil && err != informer.ErrAlreadyWatched {
-		logger.Errorf("add scope watching service: %s failed: %v", name, err)
-		return
-	}
-
-	handleServiceInstances := func(instanceKvs map[string]*spec.ServiceInstanceSpec) (continueWatch bool) {
-		continueWatch = true
-		defer ic.recover()
-
-		logger.Infof("handle informer service: %s's instance update event, ins: %#v", name, instanceKvs)
-		ic.applyPipeline(name)
-
-		return
-	}
-
-	err = ic.informer.OnServiceInstanceSpecs(name, handleServiceInstances)
-	if err != nil && err != informer.ErrAlreadyWatched {
-		logger.Errorf("add prefix watching service: %s failed: %v", name, err)
-		return
-	}
-}
-
-func (ic *IngressController) watchEvent() {
-	ic.watchIngress()
-
-	for {
-		select {
-		case <-ic.done:
-			return
-		case name := <-ic.addServiceEvent:
-			ic.watchService(name)
-		case name := <-ic.removeServiceEvent:
-			ic.stopWatchService(name)
-			ic.deletePipeline(name)
-		}
-	}
-}
-
 // Status returns the status of IngressController.
 func (ic *IngressController) Status() *supervisor.Status {
 	return &supervisor.Status{
-		ObjectStatus: nil,
+		ObjectStatus: struct{}{},
 	}
 }
 
+// Close closes the ingress controller
 func (ic *IngressController) Close() {
-	close(ic.done)
-
 	ic.mutex.Lock()
 	defer ic.mutex.Unlock()
 
 	ic.informer.Close()
-
-	ic.tc.DeleteHTTPServer(ic.namespace, ic.httpServer.Spec().Name())
-	for _, entity := range ic.httpPipelines {
-		ic.tc.DeleteHTTPPipeline(ic.namespace, entity.Spec().Name())
-		delete(ic.httpPipelines, entity.Spec().Name())
-	}
+	ic.tc.Clean(ic.namespace)
 }

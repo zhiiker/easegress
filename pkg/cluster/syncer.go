@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, MegaEase
+ * Copyright (c) 2017, The Easegress Authors
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,34 +18,31 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/megaease/easegress/pkg/logger"
+	"github.com/megaease/easegress/v2/pkg/logger"
 )
 
-// Syncer syncs data from ETCD, it uses an ETCD watcher to receive update.
-// The syncer keeps a full copy of data, and keeps apply changes onto it when an
-// update event is received from the watcher, and then send out the full data copy.
-// The syncer also pulls full data from ETCD at a configurable pull interval, this
-// is to ensure data consistency, as ETCD watcher may be cancelled if it cannot catch
-// up with the key-value store.
-type Syncer struct {
+type syncer struct {
 	cluster      *cluster
 	client       *clientv3.Client
 	pullInterval time.Duration
 	done         chan struct{}
 }
 
-func (c *cluster) Syncer(pullInterval time.Duration) (*Syncer, error) {
+var _ Syncer = (*syncer)(nil)
+
+func (c *cluster) Syncer(pullInterval time.Duration) (Syncer, error) {
 	client, err := c.getClient()
 	if err != nil {
 		return nil, err
 	}
-	return &Syncer{
+	return &syncer{
 		cluster:      c,
 		client:       client,
 		pullInterval: pullInterval,
@@ -53,7 +50,7 @@ func (c *cluster) Syncer(pullInterval time.Duration) (*Syncer, error) {
 	}, nil
 }
 
-func (s *Syncer) pull(key string, prefix bool) (map[string]*mvccpb.KeyValue, error) {
+func (s *syncer) pull(key string, prefix bool) (map[string]*mvccpb.KeyValue, error) {
 	if prefix {
 		result, err := s.cluster.GetRawPrefix(key)
 		if err != nil {
@@ -76,44 +73,72 @@ func (s *Syncer) pull(key string, prefix bool) (map[string]*mvccpb.KeyValue, err
 	return result, nil
 }
 
-func (s *Syncer) watch(key string, prefix bool) (clientv3.Watcher, clientv3.WatchChan) {
+func (s *syncer) watch(key string, prefix bool) (clientv3.Watcher, clientv3.WatchChan) {
 	opts := make([]clientv3.OpOption, 0, 1)
 	if prefix {
 		opts = append(opts, clientv3.WithPrefix())
 	}
 	watcher := clientv3.NewWatcher(s.client)
 	watchChan := watcher.Watch(context.Background(), key, opts...)
-	logger.Debugf("watcher created for key %s", key)
+	logger.Debugf("watcher created for key %s (prefix: %v)", key, prefix)
 	return watcher, watchChan
 }
 
-func isKeyValueChanged(oldKV, newKV *mvccpb.KeyValue) bool {
-	if oldKV == nil {
-		return true
-	}
-	if newKV.ModRevision <= oldKV.ModRevision {
+func isDataEqual(data1 map[string]*mvccpb.KeyValue, data2 map[string]*mvccpb.KeyValue) bool {
+	if len(data1) != len(data2) {
 		return false
 	}
-	return string(newKV.Value) != string(oldKV.Value)
+
+	for k1, kv1 := range data1 {
+		kv2, exists := data2[k1]
+		if !exists {
+			return false
+		}
+
+		if !isKeyValueEqual(kv1, kv2) {
+			return false
+		}
+	}
+
+	return true
 }
 
-func (s *Syncer) run(key string, prefix bool, send func(data map[string]*mvccpb.KeyValue)) {
+func isKeyValueEqual(kv1, kv2 *mvccpb.KeyValue) bool {
+	switch {
+	case kv1 == nil && kv2 == nil:
+		return true
+	case kv1 == nil && kv2 != nil:
+		return false
+	case kv1 != nil && kv2 == nil:
+		return false
+	default:
+		// case kv1 != nil && kv2 != nil:
+		return bytes.Equal(kv1.Key, kv2.Key) && bytes.Equal(kv1.Value, kv2.Value)
+	}
+}
+
+func (s *syncer) run(key string, prefix bool, send func(data map[string]*mvccpb.KeyValue)) {
 	watcher, watchChan := s.watch(key, prefix)
 	defer watcher.Close()
 
-	// pull and send out full data copy. otherwise, if the application retrieves a copy
-	// of data at the beginnng, and if data is updated after the retrieval and before the
-	// syncer starts, it may take a long time (the pull interval) for the application to
-	// receive latest data.
-	data, err := s.pull(key, prefix)
-	if err == nil {
-		send(data)
-	} else {
-		data = make(map[string]*mvccpb.KeyValue)
-	}
-
 	ticker := time.NewTicker(s.pullInterval)
 	defer ticker.Stop()
+
+	data := make(map[string]*mvccpb.KeyValue)
+
+	pullCompareSend := func() {
+		newData, err := s.pull(key, prefix)
+		if err != nil {
+			logger.Errorf("pull data for key %s (prefix: %v) failed: %v", key, prefix, err)
+			return
+		}
+		if !isDataEqual(data, newData) {
+			data = newData
+			send(data)
+		}
+	}
+
+	pullCompareSend()
 
 	for {
 		select {
@@ -121,19 +146,12 @@ func (s *Syncer) run(key string, prefix bool, send func(data map[string]*mvccpb.
 			return
 
 		case <-ticker.C:
-			newData, err := s.pull(key, prefix)
-			if err != nil {
-				continue
-			}
-			// always send data in this case even there're no changes to ensure data
-			// consistency
-			data = newData
+			pullCompareSend()
 
 		case resp := <-watchChan:
 			if resp.Canceled {
-				// ETCD cancel a watcher when it cannot catch up with the progress of
-				// the key-value store. And no matter what happens, we need to restart
-				// the watcher.
+				// Etcd cancels a watcher when it cannot catch up with the progress of
+				// the key-value store. And no matter what happens, we restart the watcher.
 				logger.Debugf("watch key %s canceled: %v", key, resp.Err())
 				watcher.Close()
 				watcher, watchChan = s.watch(key, prefix)
@@ -143,36 +161,13 @@ func (s *Syncer) run(key string, prefix bool, send func(data map[string]*mvccpb.
 				continue
 			}
 
-			// apply changes to existing data
-			changed := false
-			for _, event := range resp.Events {
-				k := string(event.Kv.Key)
-				oldKV, newKV := data[k], event.Kv
-				switch event.Type {
-				case mvccpb.PUT:
-					if isKeyValueChanged(oldKV, newKV) {
-						data[k] = newKV
-						changed = true
-					}
-				case mvccpb.DELETE:
-					if oldKV != nil && newKV.ModRevision > oldKV.ModRevision {
-						delete(data, k)
-						changed = true
-					}
-				default:
-					logger.Errorf("BUG: key %s received unknown event type %v", k, event.Type)
-				}
-			}
-			if !changed {
-				continue
-			}
+			pullCompareSend()
 		}
-
-		send(data)
 	}
 }
 
-func (s *Syncer) Sync(key string) (<-chan *string, error) {
+// Sync syncs a given Etcd key's value through the returned channel.
+func (s *syncer) Sync(key string) (<-chan *string, error) {
 	ch := make(chan *string, 10)
 
 	fn := func(data map[string]*mvccpb.KeyValue) {
@@ -192,7 +187,8 @@ func (s *Syncer) Sync(key string) (<-chan *string, error) {
 	return ch, nil
 }
 
-func (s *Syncer) SyncRaw(key string) (<-chan *mvccpb.KeyValue, error) {
+// SyncRaw syncs a given Etcd key's raw Etcd mvccpb structure through the returned channel.
+func (s *syncer) SyncRaw(key string) (<-chan *mvccpb.KeyValue, error) {
 	ch := make(chan *mvccpb.KeyValue, 10)
 
 	fn := func(data map[string]*mvccpb.KeyValue) {
@@ -207,7 +203,8 @@ func (s *Syncer) SyncRaw(key string) (<-chan *mvccpb.KeyValue, error) {
 	return ch, nil
 }
 
-func (s *Syncer) SyncPrefix(prefix string) (<-chan map[string]string, error) {
+// SyncPrefix syncs Etcd keys' values with the same prefix through the returned channel.
+func (s *syncer) SyncPrefix(prefix string) (<-chan map[string]string, error) {
 	ch := make(chan map[string]string, 10)
 
 	fn := func(data map[string]*mvccpb.KeyValue) {
@@ -226,7 +223,8 @@ func (s *Syncer) SyncPrefix(prefix string) (<-chan map[string]string, error) {
 	return ch, nil
 }
 
-func (s *Syncer) SyncRawPrefix(prefix string) (<-chan map[string]*mvccpb.KeyValue, error) {
+// SyncRawPrefix syncs Etcd keys' values with the same prefix in raw Etcd mvccpb structure format through the returned channel.
+func (s *syncer) SyncRawPrefix(prefix string) (<-chan map[string]*mvccpb.KeyValue, error) {
 	ch := make(chan map[string]*mvccpb.KeyValue, 10)
 
 	fn := func(data map[string]*mvccpb.KeyValue) {
@@ -246,6 +244,7 @@ func (s *Syncer) SyncRawPrefix(prefix string) (<-chan map[string]*mvccpb.KeyValu
 	return ch, nil
 }
 
-func (s *Syncer) Close() {
+// Close closes the syncer.
+func (s *syncer) Close() {
 	close(s.done)
 }
